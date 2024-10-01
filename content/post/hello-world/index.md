@@ -4,6 +4,7 @@ description: Welcome to my Blog
 slug: hello-world
 date: 2024-10-01 02:09:01.426 +0800
 image: cover.png
+weight: 5
 
 categories:
     - 杂项
