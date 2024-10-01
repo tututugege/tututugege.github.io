@@ -22,7 +22,7 @@ BOOM采用的是统一的物理寄存器实现重命名的设计，也就是所�
 
 重命名模块的组成成分可以分为：Map Table、Free List、Busy Table三部分。
 
-![rename-pipeline](./rename-pipeline.png)
+![rename-pipeline](rename-pipeline.png)
 
 ### Map Table
 
