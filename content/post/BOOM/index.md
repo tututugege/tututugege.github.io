@@ -1,7 +1,7 @@
 ---
 title: RISCV-BOOM后端学习-01 Rename
 description: BOOM处理器的学习记录
-date: 2024-10-02 03:58:00.000 +0800
+date: 2024-10-03 04:20:00.000 +0800
 tags:
     - BOOM
     - CPU
@@ -22,14 +22,17 @@ BOOM采用的是统一的物理寄存器实现重命名的设计，也就是所�
 
 重命名模块的组成成分可以分为：Map Table、Free List、Busy Table三部分。
 
-![rename-pipeline](rename-pipeline.png)
+![rename-pipeline](rename-pipline.png)
 
 ### Map Table
 
 BOOM的map_table是常规的用逻辑寄存器号寻址的结构，我原以为能容纳更多checkpoint的CAM内容寻址结构会是主流，但根据目前看过的资料发现这种结构似乎不常用？典型例子我只看过姚老师书上的Alpha21264。
 
+BOOM对每个分支TAG保存了完整的`map_table`，这种实现方面会导致checkpoint非常占面积，并且容纳的分支指令有限，不过free_list以及用于发射队列和ROB恢复的分支TAG也是有限的，在这种情况下即使使用CAM结构的重命名表checkpoint足够多也没法容纳过量的分支指令。
 
-BOOM同时保存了推测执行的重命名表和提交之后才变化的committed map table，分支指令采用checkpoint/ snapshot保存当前的重命名表，misprediction时用其恢复，这种实现方面会导致checkpoint非常占面积，并且容纳的分支指令有限，不过free_list以及用于发射队列和ROB恢复的分支TAG也是有限的，在这种情况下即使重命名表checkpoint足够多也没法容纳过量的分支指令。
+BOOM有两种实现，可以同时保存了推测执行的重命名表和提交之后才变化的committed map table， 
+
+misprediction时用其恢复，也可以用ROB中记录的旧映射关系恢复，
 
 
 这部分代码还算比较好理解
@@ -38,14 +41,16 @@ BOOM同时保存了推测执行的重命名表和提交之后才变化的committ
   val com_map_table = RegInit(VecInit((0 until numLregs) map { i => i.U(pregSz.W) }))
   val br_snapshots = Reg(Vec(maxBrCount, Vec(numLregs, UInt(pregSz.W))))
 ```
-`map_table`为推测执行的映射表，`com_map_table`为提交后更新的architecture map table，`br_snapshots`为checkpoint/snapshot，可以保存一整个映射表，maxBrCount默认为4，参数在`maxBrCount`中。
+`map_table`为推测执行的映射表，`com_map_table`为提交后更新的
+architecture map table，根据rollback的处理方法决定是否存在，
+`br_snapshots`为checkpointsnapshot，可以保存一整个映射表，maxBrCount默认为4
+
 ```scala
   val remap_pdsts = io.remap_reqs map (_.pdst)
   val remap_ldsts_oh = io.remap_reqs map (req => UIntToOH(req.ldst) & Fill(numLregs, req.valid.asUInt))
 
   val com_remap_pdsts = io.com_remap_reqs map (_.pdst)
   val com_remap_ldsts_oh = io.com_remap_reqs map (req => UIntToOH(req.ldst) & Fill(numLregs, req.valid.asUInt))
-
 ```
 每个表项，检查每个修改重命名表的请求地址独热码的对应位来选择表项的下一个值，函数式编程实在不太容易一眼看出端倪，如果用verilog描述应该会很好理解。
 
@@ -113,7 +118,9 @@ for (i <- 0 until plWidth) {
     if (!float) io.map_resps(i).prs3 := DontCare
   }
 ```
-这部分处理了当前处理的几条指令存在RAW情况下后面读寄存器指令的操作数来源问题，以及WAW情况下后一条指令需要保存的旧的映射关系来源的问题，它们来自于分配给前一条写寄存器指令分配到的preg号而非map_table读出来的值（函数式编程还是不太容易看啊）
+这部分处理的是`map_table`的前递，实际上输入的`remap_reqs`并非当前的`map_reqs`对应的pdst，
+这部分是上一个周期的指令分配到的目的寄存器，此时还未将映射关系写入`map_table`
+后面在`rename-stage`中还需要处理同时重命名的指令的前递问题。
 
 
 ### Free List
@@ -122,7 +129,9 @@ for (i <- 0 until plWidth) {
   val spec_alloc_list = RegInit(0.U(numPregs.W)) // free_list和~spec_alloc_list的区别？
   val br_alloc_lists = Reg(Vec(maxBrCount, UInt(numPregs.W)))
 ```
-Free List有三部分，`free_list`保存当前空闲的寄存器，`spec_alloc_list`保存目前处于推测状态的分配的寄存器，`br_alloc_lists`对应分支tag的snapshot。
+Free List有三部分，`free_list`保存当前空闲的寄存器，
+`spec_alloc_list`保存目前处于推测状态的分配的寄存器，
+`br_alloc_lists`对应分支tag的snapshot。
 
 
 ```scala
@@ -134,7 +143,12 @@ Free List有三部分，`free_list`保存当前空闲的寄存器，`spec_alloc_
   val rollback_deallocs = spec_alloc_list & Fill(n, io.rollback)
 ```
 
-最开始没太看懂spec_alloc_list的作用，总感觉似乎和free_list只是取反的一个关系，实际并非如此，spec_alloc_list用于rollback，也就是消除当前的推测状态，即上面的rollback_deallocs，一条指令的pdst在ROB提交时即消除了推测的分配状态，因此在spec_alloc_list要置为0，但是这个pdst只有作为某条指令的stale_pdst被提交时才会被释放放回free_list，输入的com_despec即为当前提交指令的pdst
+最开始没太看懂spec_alloc_list的作用，总感觉似乎和free_list只是取反的一个关系，
+实际并非如此，spec_alloc_list用于rollback，也就是消除当前的推测状态，
+即上面的rollback_deallocs，一条指令的pdst在ROB提交时即消除了推测的分配状态，
+因此在spec_alloc_list要置为0，
+但是这个pdst只有作为某条指令的stale_pdst被提交时才会被释放放回free_list，
+输入的com_despec即为当前提交指令的pdst
 
 ```scala
   // Update branch snapshots
@@ -142,7 +156,6 @@ Free List有三部分，`free_list`保存当前空闲的寄存器，`spec_alloc_
     val updated_br_alloc_list = if (isImm) {
       // Immediates clear the busy table when they read, potentially before older branches resolve.
       // Thus the branch alloc lists must be updated as well
-      // 没看懂isImm
       br_alloc_lists(i) & ~br_deallocs & ~com_deallocs | alloc_masks(0)
     } else {
       br_alloc_lists(i) & ~br_deallocs | alloc_masks(0)
@@ -150,7 +163,9 @@ Free List有三部分，`free_list`保存当前空闲的寄存器，`spec_alloc_
     br_alloc_lists(i) := updated_br_alloc_list
   }
 ```
-这部分就是更新一下`br_alloc_lists`，但是这个`isImm`目前看不太明白，两部分的区别就是有没有`~com_deallocs`，提交的指令肯定位于未处理的分支指令之前，释放的物理寄存器肯定也是之前申请的，`br_alloc_lists`对应的位肯定为0，有`~com_deallocs`似乎也没什么用？BOOM默认的参数里`isImm`也是直接写的false
+这部分就是更新一下`br_alloc_lists`，但是这个`isImm`目前看不太明白，
+它对应了`ImmRenameStage`类，字面意思理解似乎是立即数操作的重命名，
+对比了一下这部分是v4新增的部分，网上没有太多资料
 
 ```scala
   if (enableSuperscalarSnapshots) {
@@ -185,7 +200,7 @@ Free List有三部分，`free_list`保存当前空闲的寄存器，`spec_alloc_
     wu
   }
 ```
-wakeup的信息会先寄存一拍再处理，看了一下v3版本是直接处理，目前不知道为何要这么设计
+wakeup的信息会先寄存一拍再处理
 
 ```scala
   // Read the busy table.
@@ -213,8 +228,159 @@ wakeup的信息会先寄存一拍再处理，看了一下v3版本是直接处理
   }
 ```
 
-`busy_table`的读逻辑会判断当前寄存下来的unbusy寄存器号是否和新增的rebusy寄存器号一致，如果一致则会有一个选择逻辑，理论上刚unbusy的寄存器估计也不会马上被释放，我估计这种情况不会太多
+`busy_table`的读逻辑会判断当前寄存下来的unbusy寄存器号是否和新增的rebusy寄存器号一致，
+如果一致则会有一个前递逻辑，理论上刚unbusy的寄存器估计也不会马上被释放，我估计这种情况不会太多
+
+## rename-stage
+
+BOOM有三种Rename模块，用于浮点运算和普通整型运算的`RenameStage`，用于SFB优化的`PredRenameStage`
+以及貌似是用于优化立即数操作的`ImmRenameStage`，后两个目前不深入研究，主要看常规的`RenameStage`
+
+重命名阶段被切分为了两级流水线，
+第一级完成读`map_table`，以及向`free_list`发出读请求，
+第二级向`map_table`发出更新请求，同时用`free_list`申请到的寄存器完成同时重命名指令间的旁路判断，
+也同时向`map_table`和`free_list`发送`br_tag`，读`busy_table`。
 
 
+```scala
+  val io = IO(new Bundle {
+    val ren_stalls = Output(Vec(plWidth, Bool()))
 
+    val kill = Input(Bool())
+
+    val dec_fire  = Input(Vec(plWidth, Bool())) // will commit state updates
+    val dec_uops  = Input(Vec(plWidth, new MicroOp()))
+
+    // physical specifiers available AND busy/ready status available.
+    val ren2_mask = Vec(plWidth, Output(Bool())) // mask of valid instructions
+    val ren2_uops = Vec(plWidth, Output(new MicroOp()))
+
+    // branch resolution (execute)
+    val brupdate = Input(new BrUpdateInfo())
+
+    val dis_fire  = Input(Vec(coreWidth, Bool()))
+    val dis_ready = Input(Bool())
+
+    // wakeup ports
+    val wakeups = Flipped(Vec(numWbPorts, Valid(new Wakeup)))
+    val child_rebusys = Input(UInt(aluWidth.W))
+
+    // commit stage
+    val com_valids = Input(Vec(plWidth, Bool()))
+    val com_uops = Input(Vec(plWidth, new MicroOp()))
+    val rollback = Input(Bool())
+
+    val debug_rob_empty = Input(Bool())
+  })
+```
+
+rename-stage的输入主要来自decode部分，其次有来自执行阶段的分支信息以及唤醒信息，
+`child_rebusys`的作用目前不太清楚
+来自下一流水级的控制信号`dis_fire`和`dis_ready`以及来自`commit`阶段的信息，
+输出的是重命名后的指令微操作
+
+
+```scala
+  override def BypassAllocations(uop: MicroOp, older_uops: Seq[MicroOp], alloc_reqs: Seq[Bool]): MicroOp = {
+    if (older_uops.size == 0) {
+      uop
+    } else {
+      val bypassed_uop = Wire(new MicroOp)
+      bypassed_uop := uop
+
+      val bypass_hits_rs1 = (older_uops zip alloc_reqs) map { case (r,a) => a && r.ldst === uop.lrs1 }
+      val bypass_hits_rs2 = (older_uops zip alloc_reqs) map { case (r,a) => a && r.ldst === uop.lrs2 }
+      val bypass_hits_rs3 = (older_uops zip alloc_reqs) map { case (r,a) => a && r.ldst === uop.lrs3 }
+      val bypass_hits_dst = (older_uops zip alloc_reqs) map { case (r,a) => a && r.ldst === uop.ldst }
+
+      val bypass_sel_rs1 = PriorityEncoderOH(bypass_hits_rs1.reverse).reverse
+      val bypass_sel_rs2 = PriorityEncoderOH(bypass_hits_rs2.reverse).reverse
+      val bypass_sel_rs3 = PriorityEncoderOH(bypass_hits_rs3.reverse).reverse
+      val bypass_sel_dst = PriorityEncoderOH(bypass_hits_dst.reverse).reverse
+
+      val do_bypass_rs1 = bypass_hits_rs1.reduce(_||_)
+      val do_bypass_rs2 = bypass_hits_rs2.reduce(_||_)
+      val do_bypass_rs3 = bypass_hits_rs3.reduce(_||_)
+      val do_bypass_dst = bypass_hits_dst.reduce(_||_)
+
+      val bypass_pdsts = older_uops.map(_.pdst)
+
+      when (do_bypass_rs1) { bypassed_uop.prs1       := Mux1H(bypass_sel_rs1, bypass_pdsts) }
+      when (do_bypass_rs2) { bypassed_uop.prs2       := Mux1H(bypass_sel_rs2, bypass_pdsts) }
+      when (do_bypass_rs3) { bypassed_uop.prs3       := Mux1H(bypass_sel_rs3, bypass_pdsts) }
+      when (do_bypass_dst) { bypassed_uop.stale_pdst := Mux1H(bypass_sel_dst, bypass_pdsts) }
+
+      bypassed_uop.prs1_busy := uop.prs1_busy || do_bypass_rs1
+      bypassed_uop.prs2_busy := uop.prs2_busy || do_bypass_rs2
+      bypassed_uop.prs3_busy := uop.prs3_busy || do_bypass_rs3
+
+      if (int) {
+        bypassed_uop.prs3      := DontCare
+        bypassed_uop.prs3_busy := false.B
+      }
+
+      bypassed_uop
+    }
+  }
+```
+
+```scala
+    val bypassed_uop = Wire(new MicroOp)
+    bypassed_uop := BypassAllocations(ren2_uops(w), ren2_uops.take(w), ren2_alloc_reqs.take(w))
+
+    io.ren2_uops(w) := GetNewUopAndBrMask(bypassed_uop, io.brupdate)
+```
+
+这段很长的一段bypass处理的就是同时重命名的指令之间的写后读关系，`older_uops`即为`ren2_uops`的前几项，
+多个写后读只取最近那一个值，所以用`PriorityEncoderOH`
+
+```scala
+    when (io.kill) {
+      r_valid := false.B
+    } .elsewhen (ren2_ready) {
+      r_valid := ren1_fire(w)
+      next_uop := ren1_uops(w)
+    } .otherwise {
+      r_valid := r_valid && !ren2_fire(w) // clear bit if uop gets dispatched
+      next_uop := r_uop
+    }
+```
+
+```scala
+  val dis_stalls = dis_hazards.scanLeft(false.B) ((s,h) => s || h).takeRight(coreWidth)
+  dis_fire := dis_valids zip dis_stalls map {case (v,s) => v && !s}
+  dis_ready := !dis_stalls.last
+```
+
+这部分是rename阶段流水线寄存器的控制逻辑，kill时将valid置为false，根据输入的`dis_ready`可以看出
+只有当dispatch部分可以接受所有指令时`dis_ready`才拉高，而`dis_fire`则是每个dispatch的端口
+都有对应的信号，所以当`dis_ready`拉高时`rename-stage`中的寄存器可以接受新的一批指令，
+否则能dispatch的指令会先被dispatch，存在hazard的指令暂存保持不变
+然后等这一批指令都能dispatch，即`dis_ready`拉高后才能接受下一批指令
+
+```scala
+    r_uop := GetNewUopAndBrMask(BypassAllocations(next_uop, ren2_uops, ren2_alloc_fire), io.brupdate)
+```
+
+这部分对`next_uop`和`ren2_uops`之间做了一个前递处理以及一个目前还不太清楚的关于`br_mask`的操作。
+按照我目前的理解，这部分前递实际上已经在`map_table`内部完成，似乎不是很有必要？
+
+各模块间的连线基本都比较明确
+
+```scala
+  for (w <- 0 until plWidth) {
+    val can_allocate = freelist.io.alloc_pregs(w).valid
+
+    // Push back against Decode stage if Rename1 can't proceed.
+    io.ren_stalls(w) := (ren2_uops(w).dst_rtype === rtype) && !can_allocate
+
+    val bypassed_uop = Wire(new MicroOp)
+    bypassed_uop := BypassAllocations(ren2_uops(w), ren2_uops.take(w), ren2_alloc_reqs.take(w))
+
+    io.ren2_uops(w) := GetNewUopAndBrMask(bypassed_uop, io.brupdate)
+  }
+```
+
+当物理寄存器个数不够时，对应端口会拉高`ren_stalls`信号，
+然后`dis_ready`为false，从而使得`dec_ready`为false
 
