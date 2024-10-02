@@ -275,9 +275,8 @@ BOOM有三种Rename模块，用于浮点运算和普通整型运算的`RenameSta
 ```
 
 rename-stage的输入主要来自decode部分，其次有来自执行阶段的分支信息以及唤醒信息，
-`child_rebusys`的作用目前不太清楚
-来自下一流水级的控制信号`dis_fire`和`dis_ready`以及来自`commit`阶段的信息，
-输出的是重命名后的指令微操作
+`child_rebusys`的作用目前不太清楚，还有来自下一流水级的控制信号`dis_fire`和`dis_ready`
+以及来自`commit`阶段的信息，输出的是重命名后的指令微操作
 
 
 ```scala
