@@ -1,0 +1,632 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>BOOM on TuTuTu's Blog</title><link>https://tututugege.github.io/tags/boom/</link><description>Recent content in BOOM on TuTuTu's Blog</description><generator>Hugo -- gohugo.io</generator><language>en-us</language><lastBuildDate>Thu, 03 Oct 2024 04:20:00 +0800</lastBuildDate><atom:link href="https://tututugege.github.io/tags/boom/index.xml" rel="self" type="application/rss+xml"/><item><title>RISCV-BOOM后端学习-01 Rename</title><link>https://tututugege.github.io/p/riscv-boom%E5%90%8E%E7%AB%AF%E5%AD%A6%E4%B9%A0-01-rename/</link><pubDate>Thu, 03 Oct 2024 04:20:00 +0800</pubDate><guid>https://tututugege.github.io/p/riscv-boom%E5%90%8E%E7%AB%AF%E5%AD%A6%E4%B9%A0-01-rename/</guid><description>&lt;h2 id="背景">背景
+&lt;/h2>&lt;p>最近要写超标量处理器的后端执行部分，看了姚永斌老师的《超标量处理器设计》后准备大展身手，结果发现很多细节实现方面存在问题，比如分支misprediction时各模块间如何配合清除错误的指令且不影响正常执行，因此想找一个开源的处理器学习一下，香山的代码相对来说比较复杂，最后选择了以更简单一点的BOOM作为参考，纯靠眼睛看代码结合文档理解，并且本人不太熟悉函数式编程，一些地方可能理解有误。&lt;/p>
+&lt;h2 id="重命名">重命名
+&lt;/h2>&lt;p>BOOM采用的是统一的物理寄存器实现重命名的设计，也就是所谓的“explicit renaming”，只有PRF，然后用单独的map table来管理映射关系，而另一种“implicitrenaming”
+则是将结果写入ROB，然后ROB提交时才写回逻辑寄存器。&lt;/p>
+&lt;p>我原以为显式重命名应该是更先进的方式，但文档上说P4，ARM A57采用的是隐式重命名，更老的的MIPS R10K，Alpha21264采用的是显式重命名，说明这两种设计算是各有取舍。&lt;/p>
+&lt;p>重命名模块的组成成分可以分为：Map Table、Free List、Busy Table三部分。&lt;/p>
+&lt;p>&lt;img src="https://tututugege.github.io/rename-pipline.png"
+loading="lazy"
+alt="rename-pipeline"
+>&lt;/p>
+&lt;h3 id="map-table">Map Table
+&lt;/h3>&lt;p>BOOM的map_table是常规的用逻辑寄存器号寻址的结构，我原以为能容纳更多checkpoint的CAM内容寻址结构会是主流，但根据目前看过的资料发现这种结构似乎不常用？典型例子我只看过姚老师书上的Alpha21264。&lt;/p>
+&lt;p>BOOM对每个分支TAG保存了完整的&lt;code>map_table&lt;/code>，这种实现方面会导致checkpoint非常占面积，并且容纳的分支指令有限，不过free_list以及用于发射队列和ROB恢复的分支TAG也是有限的，在这种情况下即使使用CAM结构的重命名表checkpoint足够多也没法容纳过量的分支指令。&lt;/p>
+&lt;p>BOOM有两种实现，可以同时保存了推测执行的重命名表和提交之后才变化的committed map table，&lt;/p>
+&lt;p>misprediction时用其恢复，也可以用ROB中记录的旧映射关系恢复，&lt;/p>
+&lt;p>这部分代码还算比较好理解&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;span class="lnt">2
+&lt;/span>&lt;span class="lnt">3
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">map_table&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">RegInit&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">VecInit&lt;/span>&lt;span class="o">((&lt;/span>&lt;span class="mi">0&lt;/span> &lt;span class="n">until&lt;/span> &lt;span class="n">numLregs&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="n">map&lt;/span> &lt;span class="o">{&lt;/span> &lt;span class="n">i&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="n">i&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">U&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">pregSz&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">W&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">}))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">com_map_table&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">RegInit&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">VecInit&lt;/span>&lt;span class="o">((&lt;/span>&lt;span class="mi">0&lt;/span> &lt;span class="n">until&lt;/span> &lt;span class="n">numLregs&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="n">map&lt;/span> &lt;span class="o">{&lt;/span> &lt;span class="n">i&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="n">i&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">U&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">pregSz&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">W&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">}))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">br_snapshots&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Reg&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">Vec&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">maxBrCount&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="nc">Vec&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">numLregs&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="nc">UInt&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">pregSz&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">W&lt;/span>&lt;span class="o">))))&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>&lt;code>map_table&lt;/code>为推测执行的映射表，&lt;code>com_map_table&lt;/code>为提交后更新的
+architecture map table，根据rollback的处理方法决定是否存在，
+&lt;code>br_snapshots&lt;/code>为checkpointsnapshot，可以保存一整个映射表，maxBrCount默认为4&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;span class="lnt">2
+&lt;/span>&lt;span class="lnt">3
+&lt;/span>&lt;span class="lnt">4
+&lt;/span>&lt;span class="lnt">5
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">remap_pdsts&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">remap_reqs&lt;/span> &lt;span class="n">map&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">pdst&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">remap_ldsts_oh&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">remap_reqs&lt;/span> &lt;span class="n">map&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">req&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="nc">UIntToOH&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">req&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ldst&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">&amp;amp;&lt;/span> &lt;span class="nc">Fill&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">numLregs&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">req&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">valid&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">asUInt&lt;/span>&lt;span class="o">))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">com_remap_pdsts&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">com_remap_reqs&lt;/span> &lt;span class="n">map&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">pdst&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">com_remap_ldsts_oh&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">com_remap_reqs&lt;/span> &lt;span class="n">map&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">req&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="nc">UIntToOH&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">req&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ldst&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">&amp;amp;&lt;/span> &lt;span class="nc">Fill&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">numLregs&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">req&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">valid&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">asUInt&lt;/span>&lt;span class="o">))&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>修改重命名表的请求对应寄存器号的独热码，
+函数式编程实在不太容易一眼看出端倪，如果用verilog描述应该会很好理解。&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt"> 1
+&lt;/span>&lt;span class="lnt"> 2
+&lt;/span>&lt;span class="lnt"> 3
+&lt;/span>&lt;span class="lnt"> 4
+&lt;/span>&lt;span class="lnt"> 5
+&lt;/span>&lt;span class="lnt"> 6
+&lt;/span>&lt;span class="lnt"> 7
+&lt;/span>&lt;span class="lnt"> 8
+&lt;/span>&lt;span class="lnt"> 9
+&lt;/span>&lt;span class="lnt">10
+&lt;/span>&lt;span class="lnt">11
+&lt;/span>&lt;span class="lnt">12
+&lt;/span>&lt;span class="lnt">13
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="c1">// Figure out the new mappings seen by each pipeline slot.
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="c1">&lt;/span> &lt;span class="k">for&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span> &lt;span class="k">&amp;lt;-&lt;/span> &lt;span class="mi">0&lt;/span> &lt;span class="n">until&lt;/span> &lt;span class="n">numLregs&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">remapped_row&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">remap_ldsts_oh&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">ldst&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="n">ldst&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">))&lt;/span> &lt;span class="n">zip&lt;/span> &lt;span class="n">remap_pdsts&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">.&lt;/span>&lt;span class="n">scanLeft&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">map_table&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">))&lt;/span> &lt;span class="o">{&lt;/span>&lt;span class="k">case&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">pdst&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">ldst&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">new_pdst&lt;/span>&lt;span class="o">))&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="nc">Mux&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">ldst&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">new_pdst&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">pdst&lt;/span>&lt;span class="o">)}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">com_remapped_row&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">com_remap_ldsts_oh&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">ldst&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="n">ldst&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">))&lt;/span> &lt;span class="n">zip&lt;/span> &lt;span class="n">com_remap_pdsts&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">.&lt;/span>&lt;span class="n">scanLeft&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">com_map_table&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">))&lt;/span> &lt;span class="o">{&lt;/span>&lt;span class="k">case&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">pdst&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">ldst&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">new_pdst&lt;/span>&lt;span class="o">))&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="nc">Mux&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">ldst&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">new_pdst&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">pdst&lt;/span>&lt;span class="o">)}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">for&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">j&lt;/span> &lt;span class="k">&amp;lt;-&lt;/span> &lt;span class="mi">0&lt;/span> &lt;span class="n">until&lt;/span> &lt;span class="n">plWidth&lt;/span>&lt;span class="o">+&lt;/span>&lt;span class="mi">1&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">remap_table&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">j&lt;/span>&lt;span class="o">)(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">remapped_row&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">j&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">com_remap_table&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">j&lt;/span>&lt;span class="o">)(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">com_remapped_row&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">j&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>这部分是算出了&lt;code>remap_table&lt;/code>和&lt;code>com_remap_table&lt;/code>的中间态，也就是每条指令执行完后相应的map_table长啥样，
+这样在有多条分支指令时可以填入当前每条指令的snapshot，&lt;code>remap_table&lt;/code>的第一维长度为&lt;code>plWidth + 1&lt;/code>，
+第0个元素即为原来的&lt;code>map_table&lt;/code>&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt"> 1
+&lt;/span>&lt;span class="lnt"> 2
+&lt;/span>&lt;span class="lnt"> 3
+&lt;/span>&lt;span class="lnt"> 4
+&lt;/span>&lt;span class="lnt"> 5
+&lt;/span>&lt;span class="lnt"> 6
+&lt;/span>&lt;span class="lnt"> 7
+&lt;/span>&lt;span class="lnt"> 8
+&lt;/span>&lt;span class="lnt"> 9
+&lt;/span>&lt;span class="lnt">10
+&lt;/span>&lt;span class="lnt">11
+&lt;/span>&lt;span class="lnt">12
+&lt;/span>&lt;span class="lnt">13
+&lt;/span>&lt;span class="lnt">14
+&lt;/span>&lt;span class="lnt">15
+&lt;/span>&lt;span class="lnt">16
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="c1">// Create snapshots of new mappings.
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="c1">&lt;/span> &lt;span class="k">if&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">enableSuperscalarSnapshots&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">for&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span> &lt;span class="k">&amp;lt;-&lt;/span> &lt;span class="mi">0&lt;/span> &lt;span class="n">until&lt;/span> &lt;span class="n">plWidth&lt;/span>&lt;span class="o">+&lt;/span>&lt;span class="mi">1&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">when&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_br_tags&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">valid&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">br_snapshots&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_br_tags&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">bits&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">remap_table&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span> &lt;span class="k">else&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">assert&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">PopCount&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_br_tags&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">valid&lt;/span>&lt;span class="o">))&lt;/span> &lt;span class="o">&amp;lt;=&lt;/span> &lt;span class="mf">1.&lt;/span>&lt;span class="n">U&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">do_br_snapshot&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_br_tags&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">valid&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">reduce&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">||&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">br_snapshot_tag&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Mux1H&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_br_tags&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">valid&lt;/span>&lt;span class="o">),&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_br_tags&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">bits&lt;/span>&lt;span class="o">))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">br_snapshot_table&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Mux1H&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_br_tags&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">valid&lt;/span>&lt;span class="o">),&lt;/span> &lt;span class="n">remap_table&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">when&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">do_br_snapshot&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">br_snapshots&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">br_snapshot_tag&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">br_snapshot_table&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>这部分就是在保存每条分支指令的snapshot，一种是一次可以有多条分支指令，
+另一种是只能有一条。最开始没看懂为啥循环长度为&lt;code>plWidth + 1&lt;/code>，
+输入的&lt;code>ren_br_tags&lt;/code>长度也为&lt;code>plWidth + 1&lt;/code>，而ex3版本这部分循环长度为&lt;code>plWidth&lt;/code>，然后发现&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;span class="lnt">2
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="n">ren2_br_tags&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="mi">0&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">valid&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="kc">false&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">B&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">ren2_br_tags&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="mi">0&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">bits&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="nc">DontCare&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;span class="lnt">2
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="n">ren2_br_tags&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">+&lt;/span>&lt;span class="mi">1&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">valid&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">ren2_fire&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="n">ren2_uops&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">allocate_brtag&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">ren2_br_tags&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">+&lt;/span>&lt;span class="mi">1&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">bits&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">ren2_uops&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">br_tag&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>输入的0端口其实就是无效的，其他每部分都往后偏移一个单位，其实真正有效的输入只有&lt;code>plWidth&lt;/code>个，
+然后每个输入都往后挪一个单位就行，这么处理可能是为了代码更好看，多出来的信号应该是会被优化掉的。&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt"> 1
+&lt;/span>&lt;span class="lnt"> 2
+&lt;/span>&lt;span class="lnt"> 3
+&lt;/span>&lt;span class="lnt"> 4
+&lt;/span>&lt;span class="lnt"> 5
+&lt;/span>&lt;span class="lnt"> 6
+&lt;/span>&lt;span class="lnt"> 7
+&lt;/span>&lt;span class="lnt"> 8
+&lt;/span>&lt;span class="lnt"> 9
+&lt;/span>&lt;span class="lnt">10
+&lt;/span>&lt;span class="lnt">11
+&lt;/span>&lt;span class="lnt">12
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl">&lt;span class="k">for&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span> &lt;span class="k">&amp;lt;-&lt;/span> &lt;span class="mi">0&lt;/span> &lt;span class="n">until&lt;/span> &lt;span class="n">plWidth&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map_resps&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">prs1&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="mi">0&lt;/span> &lt;span class="n">until&lt;/span> &lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">foldLeft&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">map_table&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">lrs1&lt;/span>&lt;span class="o">))&lt;/span> &lt;span class="o">((&lt;/span>&lt;span class="n">p&lt;/span>&lt;span class="o">,&lt;/span>&lt;span class="n">k&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="nc">Mux&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">bypass&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">B&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">remap_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">k&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">valid&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">remap_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">k&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">ldst&lt;/span> &lt;span class="o">===&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">lrs1&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">remap_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">k&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">pdst&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">p&lt;/span>&lt;span class="o">))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map_resps&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">prs2&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="mi">0&lt;/span> &lt;span class="n">until&lt;/span> &lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">foldLeft&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">map_table&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">lrs2&lt;/span>&lt;span class="o">))&lt;/span> &lt;span class="o">((&lt;/span>&lt;span class="n">p&lt;/span>&lt;span class="o">,&lt;/span>&lt;span class="n">k&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="nc">Mux&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">bypass&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">B&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">remap_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">k&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">valid&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">remap_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">k&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">ldst&lt;/span> &lt;span class="o">===&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">lrs2&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">remap_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">k&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">pdst&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">p&lt;/span>&lt;span class="o">))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map_resps&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">prs3&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="mi">0&lt;/span> &lt;span class="n">until&lt;/span> &lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">foldLeft&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">map_table&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">lrs3&lt;/span>&lt;span class="o">))&lt;/span> &lt;span class="o">((&lt;/span>&lt;span class="n">p&lt;/span>&lt;span class="o">,&lt;/span>&lt;span class="n">k&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="nc">Mux&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">bypass&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">B&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">remap_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">k&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">valid&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">remap_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">k&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">ldst&lt;/span> &lt;span class="o">===&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">lrs3&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">remap_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">k&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">pdst&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">p&lt;/span>&lt;span class="o">))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map_resps&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">stale_pdst&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="mi">0&lt;/span> &lt;span class="n">until&lt;/span> &lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">foldLeft&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">map_table&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">ldst&lt;/span>&lt;span class="o">))&lt;/span> &lt;span class="o">((&lt;/span>&lt;span class="n">p&lt;/span>&lt;span class="o">,&lt;/span>&lt;span class="n">k&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="nc">Mux&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">bypass&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">B&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">remap_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">k&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">valid&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">remap_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">k&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">ldst&lt;/span> &lt;span class="o">===&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">ldst&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">remap_reqs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">k&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">pdst&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">p&lt;/span>&lt;span class="o">))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">if&lt;/span> &lt;span class="o">(!&lt;/span>&lt;span class="n">float&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map_resps&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">prs3&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="nc">DontCare&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>这部分处理的是&lt;code>map_table&lt;/code>的前递，实际上输入的&lt;code>remap_reqs&lt;/code>并非当前的&lt;code>map_reqs&lt;/code>对应的pdst，
+这部分是上一个周期的指令分配到的目的寄存器，此时还未将映射关系写入&lt;code>map_table&lt;/code>
+后面在&lt;code>rename-stage&lt;/code>中还需要处理同时重命名的指令的前递问题。&lt;/p>
+&lt;h3 id="free-list">Free List
+&lt;/h3>&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;span class="lnt">2
+&lt;/span>&lt;span class="lnt">3
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">free_list&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">RegInit&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">UInt&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">numPregs&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">W&lt;/span>&lt;span class="o">),&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">initial_allocation&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">spec_alloc_list&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">RegInit&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="mf">0.&lt;/span>&lt;span class="n">U&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">numPregs&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">W&lt;/span>&lt;span class="o">))&lt;/span> &lt;span class="c1">// free_list和~spec_alloc_list的区别？
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="c1">&lt;/span> &lt;span class="k">val&lt;/span> &lt;span class="n">br_alloc_lists&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Reg&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">Vec&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">maxBrCount&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="nc">UInt&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">numPregs&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">W&lt;/span>&lt;span class="o">)))&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>Free List有三部分，&lt;code>free_list&lt;/code>保存当前空闲的寄存器，
+&lt;code>spec_alloc_list&lt;/code>保存目前处于推测状态的分配的寄存器，
+&lt;code>br_alloc_lists&lt;/code>对应分支tag的snapshot。&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="n">spec_alloc_list&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">spec_alloc_list&lt;/span> &lt;span class="o">|&lt;/span> &lt;span class="n">alloc_masks&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="mi">0&lt;/span>&lt;span class="o">))&lt;/span> &lt;span class="o">&amp;amp;&lt;/span> &lt;span class="o">~&lt;/span>&lt;span class="n">dealloc_mask&lt;/span> &lt;span class="o">&amp;amp;&lt;/span> &lt;span class="o">~&lt;/span>&lt;span class="n">com_despec&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;br>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">rollback_deallocs&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="n">spec_alloc_list&lt;/span> &lt;span class="o">&amp;amp;&lt;/span> &lt;span class="nc">Fill&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">n&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">rollback&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>最开始没太看懂&lt;code>spec_alloc_list&lt;/code>的作用，总感觉似乎和&lt;code>free_list&lt;/code>只是取反的一个关系，
+实际并非如此，目前我的理解是&lt;code>spec_alloc_list&lt;/code>用于rollback，也就是消除当前的推测状态，
+即上面的&lt;code>rollback_deallocs&lt;/code>，一条指令的pdst在ROB提交时即消除了推测的分配状态，
+因此在&lt;code>spec_alloc_list&lt;/code>中要置为0，
+但是这个pdst只有作为某条指令的&lt;code>stale_pdst&lt;/code>被提交时才会被释放放回&lt;code>free_list&lt;/code>，
+所以&lt;code>spec_alloc_list&lt;/code>和&lt;code>~free_list&lt;/code>并不相等，输入的com_despec即为当前提交指令的pdst&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt"> 1
+&lt;/span>&lt;span class="lnt"> 2
+&lt;/span>&lt;span class="lnt"> 3
+&lt;/span>&lt;span class="lnt"> 4
+&lt;/span>&lt;span class="lnt"> 5
+&lt;/span>&lt;span class="lnt"> 6
+&lt;/span>&lt;span class="lnt"> 7
+&lt;/span>&lt;span class="lnt"> 8
+&lt;/span>&lt;span class="lnt"> 9
+&lt;/span>&lt;span class="lnt">10
+&lt;/span>&lt;span class="lnt">11
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="c1">// Update branch snapshots
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="c1">&lt;/span> &lt;span class="k">for&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span> &lt;span class="k">&amp;lt;-&lt;/span> &lt;span class="mi">0&lt;/span> &lt;span class="n">until&lt;/span> &lt;span class="n">maxBrCount&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">updated_br_alloc_list&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="k">if&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">isImm&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="c1">// Immediates clear the busy table when they read, potentially before older branches resolve.
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="c1">&lt;/span> &lt;span class="c1">// Thus the branch alloc lists must be updated as well
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="c1">&lt;/span> &lt;span class="n">br_alloc_lists&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">&amp;amp;&lt;/span> &lt;span class="o">~&lt;/span>&lt;span class="n">br_deallocs&lt;/span> &lt;span class="o">&amp;amp;&lt;/span> &lt;span class="o">~&lt;/span>&lt;span class="n">com_deallocs&lt;/span> &lt;span class="o">|&lt;/span> &lt;span class="n">alloc_masks&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="mi">0&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span> &lt;span class="k">else&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">br_alloc_lists&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">&amp;amp;&lt;/span> &lt;span class="o">~&lt;/span>&lt;span class="n">br_deallocs&lt;/span> &lt;span class="o">|&lt;/span> &lt;span class="n">alloc_masks&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="mi">0&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">br_alloc_lists&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">updated_br_alloc_list&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>这部分就是更新一下&lt;code>br_alloc_lists&lt;/code>，但是这个&lt;code>isImm&lt;/code>目前看不太明白，
+它对应了&lt;code>ImmRenameStage&lt;/code>类，字面意思理解似乎是立即数操作的重命名，
+对比了一下这部分是v4新增的部分，网上没有太多资料&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt"> 1
+&lt;/span>&lt;span class="lnt"> 2
+&lt;/span>&lt;span class="lnt"> 3
+&lt;/span>&lt;span class="lnt"> 4
+&lt;/span>&lt;span class="lnt"> 5
+&lt;/span>&lt;span class="lnt"> 6
+&lt;/span>&lt;span class="lnt"> 7
+&lt;/span>&lt;span class="lnt"> 8
+&lt;/span>&lt;span class="lnt"> 9
+&lt;/span>&lt;span class="lnt">10
+&lt;/span>&lt;span class="lnt">11
+&lt;/span>&lt;span class="lnt">12
+&lt;/span>&lt;span class="lnt">13
+&lt;/span>&lt;span class="lnt">14
+&lt;/span>&lt;span class="lnt">15
+&lt;/span>&lt;span class="lnt">16
+&lt;/span>&lt;span class="lnt">17
+&lt;/span>&lt;span class="lnt">18
+&lt;/span>&lt;span class="lnt">19
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="k">if&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">enableSuperscalarSnapshots&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">br_slots&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">VecInit&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_br_tags&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">tag&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="n">tag&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">valid&lt;/span>&lt;span class="o">)).&lt;/span>&lt;span class="n">asUInt&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="c1">// Create branch allocation lists.
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="c1">&lt;/span> &lt;span class="k">for&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span> &lt;span class="k">&amp;lt;-&lt;/span> &lt;span class="mi">0&lt;/span> &lt;span class="n">until&lt;/span> &lt;span class="n">maxBrCount&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">list_req&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">VecInit&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_br_tags&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">tag&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="n">tag&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">bits&lt;/span> &lt;span class="o">===&lt;/span> &lt;span class="n">i&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">U&lt;/span>&lt;span class="o">)).&lt;/span>&lt;span class="n">asUInt&lt;/span> &lt;span class="o">&amp;amp;&lt;/span> &lt;span class="n">br_slots&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">new_list&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="n">list_req&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">orR&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">when&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">new_list&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">br_alloc_lists&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="nc">Mux1H&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">list_req&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">alloc_masks&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span> &lt;span class="k">else&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">assert&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">PopCount&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_br_tags&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">valid&lt;/span>&lt;span class="o">))&lt;/span> &lt;span class="o">&amp;lt;=&lt;/span> &lt;span class="mf">1.&lt;/span>&lt;span class="n">U&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">do_br_snapshot&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_br_tags&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">valid&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">reduce&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">||&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">br_snapshot_tag&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Mux1H&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_br_tags&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">valid&lt;/span>&lt;span class="o">),&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_br_tags&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">bits&lt;/span>&lt;span class="o">))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">br_snapshot_list&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Mux1H&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_br_tags&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">valid&lt;/span>&lt;span class="o">),&lt;/span> &lt;span class="n">alloc_masks&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">when&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">do_br_snapshot&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">br_alloc_lists&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">br_snapshot_tag&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">br_snapshot_list&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>这里对分支br_alloc_lists的记录巧用了前面的&lt;code>scanRight&lt;/code>，
+&lt;code>alloc_masks&lt;/code>每个元素对应的恰好就是该指令以及之后的指令alloc到的物理寄存器，
+函数式编程还真有用，虽然还是不好理解&lt;/p>
+&lt;h3 id="busy-table">Busy Table
+&lt;/h3>&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;span class="lnt">2
+&lt;/span>&lt;span class="lnt">3
+&lt;/span>&lt;span class="lnt">4
+&lt;/span>&lt;span class="lnt">5
+&lt;/span>&lt;span class="lnt">6
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">wakeups&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">wakeups&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span> &lt;span class="o">{&lt;/span> &lt;span class="n">w&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">wu&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Wire&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">Valid&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">new&lt;/span> &lt;span class="nc">Wakeup&lt;/span>&lt;span class="o">))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">wu&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">valid&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="nc">RegNext&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">valid&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="o">((&lt;/span>&lt;span class="nc">RegNext&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">bits&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">speculative_mask&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">&amp;amp;&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">child_rebusys&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">===&lt;/span> &lt;span class="mf">0.&lt;/span>&lt;span class="n">U&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">wu&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">bits&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="nc">RegNext&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">bits&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">wu&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>wakeup的信息会先寄存一拍再处理&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt"> 1
+&lt;/span>&lt;span class="lnt"> 2
+&lt;/span>&lt;span class="lnt"> 3
+&lt;/span>&lt;span class="lnt"> 4
+&lt;/span>&lt;span class="lnt"> 5
+&lt;/span>&lt;span class="lnt"> 6
+&lt;/span>&lt;span class="lnt"> 7
+&lt;/span>&lt;span class="lnt"> 8
+&lt;/span>&lt;span class="lnt"> 9
+&lt;/span>&lt;span class="lnt">10
+&lt;/span>&lt;span class="lnt">11
+&lt;/span>&lt;span class="lnt">12
+&lt;/span>&lt;span class="lnt">13
+&lt;/span>&lt;span class="lnt">14
+&lt;/span>&lt;span class="lnt">15
+&lt;/span>&lt;span class="lnt">16
+&lt;/span>&lt;span class="lnt">17
+&lt;/span>&lt;span class="lnt">18
+&lt;/span>&lt;span class="lnt">19
+&lt;/span>&lt;span class="lnt">20
+&lt;/span>&lt;span class="lnt">21
+&lt;/span>&lt;span class="lnt">22
+&lt;/span>&lt;span class="lnt">23
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="c1">// Read the busy table.
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="c1">&lt;/span> &lt;span class="k">for&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span> &lt;span class="k">&amp;lt;-&lt;/span> &lt;span class="mi">0&lt;/span> &lt;span class="n">until&lt;/span> &lt;span class="n">plWidth&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">prs1_match&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="n">wakeups&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span> &lt;span class="o">{&lt;/span> &lt;span class="n">w&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="n">w&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">valid&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="n">w&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">bits&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">uop&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">pdst&lt;/span> &lt;span class="o">===&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_uops&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">prs1&lt;/span> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">prs2_match&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="n">wakeups&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span> &lt;span class="o">{&lt;/span> &lt;span class="n">w&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="n">w&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">valid&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="n">w&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">bits&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">uop&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">pdst&lt;/span> &lt;span class="o">===&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_uops&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">prs2&lt;/span> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">prs3_match&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="n">wakeups&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span> &lt;span class="o">{&lt;/span> &lt;span class="n">w&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="n">w&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">valid&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="n">w&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">bits&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">uop&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">pdst&lt;/span> &lt;span class="o">===&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_uops&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">prs3&lt;/span> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">busy_resps&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">prs1_busy&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">busy_table&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_uops&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">prs1&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">busy_resps&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">prs2_busy&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">busy_table&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_uops&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">prs2&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">busy_resps&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">prs3_busy&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">busy_table&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_uops&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">prs3&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">when&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">prs1_match&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">reduce&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">||&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">))&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">busy_resps&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">prs1_busy&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="nc">Mux1H&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">prs1_match&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">wakeups&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span> &lt;span class="o">{&lt;/span> &lt;span class="n">w&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="n">w&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">valid&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="n">w&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">bits&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">rebusy&lt;/span> &lt;span class="o">})&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">when&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">prs2_match&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">reduce&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">||&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">))&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">busy_resps&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">prs2_busy&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="nc">Mux1H&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">prs2_match&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">wakeups&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span> &lt;span class="o">{&lt;/span> &lt;span class="n">w&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="n">w&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">valid&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="n">w&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">bits&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">rebusy&lt;/span> &lt;span class="o">})&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">when&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">prs3_match&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">reduce&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">||&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">))&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">busy_resps&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">prs3_busy&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="nc">Mux1H&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">prs3_match&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">wakeups&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span> &lt;span class="o">{&lt;/span> &lt;span class="n">w&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="n">w&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">valid&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="n">w&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">bits&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">rebusy&lt;/span> &lt;span class="o">})&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">if&lt;/span> &lt;span class="o">(!&lt;/span>&lt;span class="n">float&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">busy_resps&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">i&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">prs3_busy&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="kc">false&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">B&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>&lt;code>busy_table&lt;/code>的读逻辑会判断当前寄存下来的unbusy寄存器号是否和新增的rebusy寄存器号一致，
+如果一致则会有一个前递逻辑，理论上刚unbusy的寄存器估计也不会马上被释放，我估计这种情况不会太多&lt;/p>
+&lt;h2 id="rename-stage">rename-stage
+&lt;/h2>&lt;p>BOOM有三种Rename模块，用于浮点运算和普通整型运算的&lt;code>RenameStage&lt;/code>，用于SFB优化的&lt;code>PredRenameStage&lt;/code>
+以及貌似是用于优化立即数操作的&lt;code>ImmRenameStage&lt;/code>，后两个目前不深入研究，主要看常规的&lt;code>RenameStage&lt;/code>&lt;/p>
+&lt;p>重命名阶段被切分为了两级流水线，
+第一级完成读&lt;code>map_table&lt;/code>，以及向&lt;code>free_list&lt;/code>发出读请求，
+第二级向&lt;code>map_table&lt;/code>发出更新请求，同时用&lt;code>free_list&lt;/code>申请到的寄存器完成同时重命名指令间的旁路判断，
+也同时向&lt;code>map_table&lt;/code>和&lt;code>free_list&lt;/code>发送&lt;code>br_tag&lt;/code>，读&lt;code>busy_table&lt;/code>。&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt"> 1
+&lt;/span>&lt;span class="lnt"> 2
+&lt;/span>&lt;span class="lnt"> 3
+&lt;/span>&lt;span class="lnt"> 4
+&lt;/span>&lt;span class="lnt"> 5
+&lt;/span>&lt;span class="lnt"> 6
+&lt;/span>&lt;span class="lnt"> 7
+&lt;/span>&lt;span class="lnt"> 8
+&lt;/span>&lt;span class="lnt"> 9
+&lt;/span>&lt;span class="lnt">10
+&lt;/span>&lt;span class="lnt">11
+&lt;/span>&lt;span class="lnt">12
+&lt;/span>&lt;span class="lnt">13
+&lt;/span>&lt;span class="lnt">14
+&lt;/span>&lt;span class="lnt">15
+&lt;/span>&lt;span class="lnt">16
+&lt;/span>&lt;span class="lnt">17
+&lt;/span>&lt;span class="lnt">18
+&lt;/span>&lt;span class="lnt">19
+&lt;/span>&lt;span class="lnt">20
+&lt;/span>&lt;span class="lnt">21
+&lt;/span>&lt;span class="lnt">22
+&lt;/span>&lt;span class="lnt">23
+&lt;/span>&lt;span class="lnt">24
+&lt;/span>&lt;span class="lnt">25
+&lt;/span>&lt;span class="lnt">26
+&lt;/span>&lt;span class="lnt">27
+&lt;/span>&lt;span class="lnt">28
+&lt;/span>&lt;span class="lnt">29
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">io&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">IO&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">new&lt;/span> &lt;span class="nc">Bundle&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">ren_stalls&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Output&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">Vec&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">plWidth&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="nc">Bool&lt;/span>&lt;span class="o">()))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">kill&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Input&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">Bool&lt;/span>&lt;span class="o">())&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">dec_fire&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Input&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">Vec&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">plWidth&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="nc">Bool&lt;/span>&lt;span class="o">()))&lt;/span> &lt;span class="c1">// will commit state updates
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="c1">&lt;/span> &lt;span class="k">val&lt;/span> &lt;span class="n">dec_uops&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Input&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">Vec&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">plWidth&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="k">new&lt;/span> &lt;span class="nc">MicroOp&lt;/span>&lt;span class="o">()))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="c1">// physical specifiers available AND busy/ready status available.
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="c1">&lt;/span> &lt;span class="k">val&lt;/span> &lt;span class="n">ren2_mask&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Vec&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">plWidth&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="nc">Output&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">Bool&lt;/span>&lt;span class="o">()))&lt;/span> &lt;span class="c1">// mask of valid instructions
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="c1">&lt;/span> &lt;span class="k">val&lt;/span> &lt;span class="n">ren2_uops&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Vec&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">plWidth&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="nc">Output&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">new&lt;/span> &lt;span class="nc">MicroOp&lt;/span>&lt;span class="o">()))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="c1">// branch resolution (execute)
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="c1">&lt;/span> &lt;span class="k">val&lt;/span> &lt;span class="n">brupdate&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Input&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">new&lt;/span> &lt;span class="nc">BrUpdateInfo&lt;/span>&lt;span class="o">())&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">dis_fire&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Input&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">Vec&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">coreWidth&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="nc">Bool&lt;/span>&lt;span class="o">()))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">dis_ready&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Input&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">Bool&lt;/span>&lt;span class="o">())&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="c1">// wakeup ports
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="c1">&lt;/span> &lt;span class="k">val&lt;/span> &lt;span class="n">wakeups&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Flipped&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">Vec&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">numWbPorts&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="nc">Valid&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">new&lt;/span> &lt;span class="nc">Wakeup&lt;/span>&lt;span class="o">)))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">child_rebusys&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Input&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">UInt&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">aluWidth&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">W&lt;/span>&lt;span class="o">))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="c1">// commit stage
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="c1">&lt;/span> &lt;span class="k">val&lt;/span> &lt;span class="n">com_valids&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Input&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">Vec&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">plWidth&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="nc">Bool&lt;/span>&lt;span class="o">()))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">com_uops&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Input&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">Vec&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">plWidth&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="k">new&lt;/span> &lt;span class="nc">MicroOp&lt;/span>&lt;span class="o">()))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">rollback&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Input&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">Bool&lt;/span>&lt;span class="o">())&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">debug_rob_empty&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Input&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">Bool&lt;/span>&lt;span class="o">())&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">})&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>rename-stage的输入主要来自decode部分，其次有来自执行阶段的分支信息以及唤醒信息，
+&lt;code>child_rebusys&lt;/code>的作用目前不太清楚，还有来自下一流水级的控制信号&lt;code>dis_fire&lt;/code>和&lt;code>dis_ready&lt;/code>
+以及来自&lt;code>commit&lt;/code>阶段的信息，输出的是重命名后的指令微操作&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt"> 1
+&lt;/span>&lt;span class="lnt"> 2
+&lt;/span>&lt;span class="lnt"> 3
+&lt;/span>&lt;span class="lnt"> 4
+&lt;/span>&lt;span class="lnt"> 5
+&lt;/span>&lt;span class="lnt"> 6
+&lt;/span>&lt;span class="lnt"> 7
+&lt;/span>&lt;span class="lnt"> 8
+&lt;/span>&lt;span class="lnt"> 9
+&lt;/span>&lt;span class="lnt">10
+&lt;/span>&lt;span class="lnt">11
+&lt;/span>&lt;span class="lnt">12
+&lt;/span>&lt;span class="lnt">13
+&lt;/span>&lt;span class="lnt">14
+&lt;/span>&lt;span class="lnt">15
+&lt;/span>&lt;span class="lnt">16
+&lt;/span>&lt;span class="lnt">17
+&lt;/span>&lt;span class="lnt">18
+&lt;/span>&lt;span class="lnt">19
+&lt;/span>&lt;span class="lnt">20
+&lt;/span>&lt;span class="lnt">21
+&lt;/span>&lt;span class="lnt">22
+&lt;/span>&lt;span class="lnt">23
+&lt;/span>&lt;span class="lnt">24
+&lt;/span>&lt;span class="lnt">25
+&lt;/span>&lt;span class="lnt">26
+&lt;/span>&lt;span class="lnt">27
+&lt;/span>&lt;span class="lnt">28
+&lt;/span>&lt;span class="lnt">29
+&lt;/span>&lt;span class="lnt">30
+&lt;/span>&lt;span class="lnt">31
+&lt;/span>&lt;span class="lnt">32
+&lt;/span>&lt;span class="lnt">33
+&lt;/span>&lt;span class="lnt">34
+&lt;/span>&lt;span class="lnt">35
+&lt;/span>&lt;span class="lnt">36
+&lt;/span>&lt;span class="lnt">37
+&lt;/span>&lt;span class="lnt">38
+&lt;/span>&lt;span class="lnt">39
+&lt;/span>&lt;span class="lnt">40
+&lt;/span>&lt;span class="lnt">41
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="k">override&lt;/span> &lt;span class="k">def&lt;/span> &lt;span class="nc">BypassAllocations&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">uop&lt;/span>&lt;span class="k">:&lt;/span> &lt;span class="kt">MicroOp&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">older_uops&lt;/span>&lt;span class="k">:&lt;/span> &lt;span class="kt">Seq&lt;/span>&lt;span class="o">[&lt;/span>&lt;span class="kt">MicroOp&lt;/span>&lt;span class="o">],&lt;/span> &lt;span class="n">alloc_reqs&lt;/span>&lt;span class="k">:&lt;/span> &lt;span class="kt">Seq&lt;/span>&lt;span class="o">[&lt;/span>&lt;span class="kt">Bool&lt;/span>&lt;span class="o">])&lt;/span>&lt;span class="k">:&lt;/span> &lt;span class="kt">MicroOp&lt;/span> &lt;span class="o">=&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">if&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">older_uops&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">size&lt;/span> &lt;span class="o">==&lt;/span> &lt;span class="mi">0&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">uop&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span> &lt;span class="k">else&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">bypassed_uop&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Wire&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">new&lt;/span> &lt;span class="nc">MicroOp&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">bypassed_uop&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">uop&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">bypass_hits_rs1&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">older_uops&lt;/span> &lt;span class="n">zip&lt;/span> &lt;span class="n">alloc_reqs&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="n">map&lt;/span> &lt;span class="o">{&lt;/span> &lt;span class="k">case&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">r&lt;/span>&lt;span class="o">,&lt;/span>&lt;span class="n">a&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="n">a&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="n">r&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ldst&lt;/span> &lt;span class="o">===&lt;/span> &lt;span class="n">uop&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">lrs1&lt;/span> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">bypass_hits_rs2&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">older_uops&lt;/span> &lt;span class="n">zip&lt;/span> &lt;span class="n">alloc_reqs&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="n">map&lt;/span> &lt;span class="o">{&lt;/span> &lt;span class="k">case&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">r&lt;/span>&lt;span class="o">,&lt;/span>&lt;span class="n">a&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="n">a&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="n">r&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ldst&lt;/span> &lt;span class="o">===&lt;/span> &lt;span class="n">uop&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">lrs2&lt;/span> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">bypass_hits_rs3&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">older_uops&lt;/span> &lt;span class="n">zip&lt;/span> &lt;span class="n">alloc_reqs&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="n">map&lt;/span> &lt;span class="o">{&lt;/span> &lt;span class="k">case&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">r&lt;/span>&lt;span class="o">,&lt;/span>&lt;span class="n">a&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="n">a&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="n">r&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ldst&lt;/span> &lt;span class="o">===&lt;/span> &lt;span class="n">uop&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">lrs3&lt;/span> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">bypass_hits_dst&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">older_uops&lt;/span> &lt;span class="n">zip&lt;/span> &lt;span class="n">alloc_reqs&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="n">map&lt;/span> &lt;span class="o">{&lt;/span> &lt;span class="k">case&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">r&lt;/span>&lt;span class="o">,&lt;/span>&lt;span class="n">a&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="n">a&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="n">r&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ldst&lt;/span> &lt;span class="o">===&lt;/span> &lt;span class="n">uop&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ldst&lt;/span> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">bypass_sel_rs1&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">PriorityEncoderOH&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">bypass_hits_rs1&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">reverse&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">reverse&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">bypass_sel_rs2&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">PriorityEncoderOH&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">bypass_hits_rs2&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">reverse&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">reverse&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">bypass_sel_rs3&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">PriorityEncoderOH&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">bypass_hits_rs3&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">reverse&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">reverse&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">bypass_sel_dst&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">PriorityEncoderOH&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">bypass_hits_dst&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">reverse&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">reverse&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">do_bypass_rs1&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="n">bypass_hits_rs1&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">reduce&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">||&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">do_bypass_rs2&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="n">bypass_hits_rs2&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">reduce&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">||&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">do_bypass_rs3&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="n">bypass_hits_rs3&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">reduce&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">||&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">do_bypass_dst&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="n">bypass_hits_dst&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">reduce&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">||&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">bypass_pdsts&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="n">older_uops&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">map&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">_&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">pdst&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">when&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">do_bypass_rs1&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span> &lt;span class="n">bypassed_uop&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">prs1&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="nc">Mux1H&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">bypass_sel_rs1&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">bypass_pdsts&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">when&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">do_bypass_rs2&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span> &lt;span class="n">bypassed_uop&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">prs2&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="nc">Mux1H&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">bypass_sel_rs2&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">bypass_pdsts&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">when&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">do_bypass_rs3&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span> &lt;span class="n">bypassed_uop&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">prs3&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="nc">Mux1H&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">bypass_sel_rs3&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">bypass_pdsts&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">when&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">do_bypass_dst&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span> &lt;span class="n">bypassed_uop&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">stale_pdst&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="nc">Mux1H&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">bypass_sel_dst&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">bypass_pdsts&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">bypassed_uop&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">prs1_busy&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">uop&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">prs1_busy&lt;/span> &lt;span class="o">||&lt;/span> &lt;span class="n">do_bypass_rs1&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">bypassed_uop&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">prs2_busy&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">uop&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">prs2_busy&lt;/span> &lt;span class="o">||&lt;/span> &lt;span class="n">do_bypass_rs2&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">bypassed_uop&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">prs3_busy&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">uop&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">prs3_busy&lt;/span> &lt;span class="o">||&lt;/span> &lt;span class="n">do_bypass_rs3&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">if&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">int&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">bypassed_uop&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">prs3&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="nc">DontCare&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">bypassed_uop&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">prs3_busy&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="kc">false&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">B&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">bypassed_uop&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;span class="lnt">2
+&lt;/span>&lt;span class="lnt">3
+&lt;/span>&lt;span class="lnt">4
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">bypassed_uop&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Wire&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">new&lt;/span> &lt;span class="nc">MicroOp&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">bypassed_uop&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="nc">BypassAllocations&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">ren2_uops&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">),&lt;/span> &lt;span class="n">ren2_uops&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">take&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">),&lt;/span> &lt;span class="n">ren2_alloc_reqs&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">take&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren2_uops&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="nc">GetNewUopAndBrMask&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">bypassed_uop&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">brupdate&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>这段很长的一段bypass处理的就是同时重命名的指令之间的写后读关系，&lt;code>older_uops&lt;/code>即为&lt;code>ren2_uops&lt;/code>的前几项，
+多个写后读只取最近那一个值，所以用&lt;code>PriorityEncoderOH&lt;/code>&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;span class="lnt">2
+&lt;/span>&lt;span class="lnt">3
+&lt;/span>&lt;span class="lnt">4
+&lt;/span>&lt;span class="lnt">5
+&lt;/span>&lt;span class="lnt">6
+&lt;/span>&lt;span class="lnt">7
+&lt;/span>&lt;span class="lnt">8
+&lt;/span>&lt;span class="lnt">9
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="n">when&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">kill&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">r_valid&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="kc">false&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">B&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span> &lt;span class="o">.&lt;/span>&lt;span class="n">elsewhen&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">ren2_ready&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">r_valid&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">ren1_fire&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">next_uop&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">ren1_uops&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span> &lt;span class="o">.&lt;/span>&lt;span class="n">otherwise&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">r_valid&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">r_valid&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="o">!&lt;/span>&lt;span class="n">ren2_fire&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="c1">// clear bit if uop gets dispatched
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="c1">&lt;/span> &lt;span class="n">next_uop&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">r_uop&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;span class="lnt">2
+&lt;/span>&lt;span class="lnt">3
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">dis_stalls&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="n">dis_hazards&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">scanLeft&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="kc">false&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">B&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">((&lt;/span>&lt;span class="n">s&lt;/span>&lt;span class="o">,&lt;/span>&lt;span class="n">h&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="n">s&lt;/span> &lt;span class="o">||&lt;/span> &lt;span class="n">h&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">takeRight&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">coreWidth&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">dis_fire&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="n">dis_valids&lt;/span> &lt;span class="n">zip&lt;/span> &lt;span class="n">dis_stalls&lt;/span> &lt;span class="n">map&lt;/span> &lt;span class="o">{&lt;/span>&lt;span class="k">case&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">v&lt;/span>&lt;span class="o">,&lt;/span>&lt;span class="n">s&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">=&amp;gt;&lt;/span> &lt;span class="n">v&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="o">!&lt;/span>&lt;span class="n">s&lt;/span>&lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">dis_ready&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="o">!&lt;/span>&lt;span class="n">dis_stalls&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">last&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>这部分是rename阶段流水线寄存器的控制逻辑，kill时将valid置为false，根据输入的&lt;code>dis_ready&lt;/code>可以看出
+只有当dispatch部分可以接受所有指令时&lt;code>dis_ready&lt;/code>才拉高，而&lt;code>dis_fire&lt;/code>则是每个dispatch的端口
+都有对应的信号，所以当&lt;code>dis_ready&lt;/code>拉高时&lt;code>rename-stage&lt;/code>中的寄存器可以接受新的一批指令，
+否则能dispatch的指令会先被dispatch，存在hazard的指令暂存保持不变
+然后等这一批指令都能dispatch，即&lt;code>dis_ready&lt;/code>拉高后才能接受下一批指令&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt">1
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="n">r_uop&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="nc">GetNewUopAndBrMask&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="nc">BypassAllocations&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">next_uop&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">ren2_uops&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">ren2_alloc_fire&lt;/span>&lt;span class="o">),&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">brupdate&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>这部分对&lt;code>next_uop&lt;/code>和&lt;code>ren2_uops&lt;/code>之间做了一个前递处理以及一个目前还不太清楚的关于&lt;code>br_mask&lt;/code>的操作。
+按照我目前的理解，这部分前递实际上已经在&lt;code>map_table&lt;/code>内部完成，似乎不是很有必要？&lt;/p>
+&lt;p>各模块间的连线基本都比较明确&lt;/p>
+&lt;div class="highlight">&lt;div class="chroma">
+&lt;table class="lntable">&lt;tr>&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code>&lt;span class="lnt"> 1
+&lt;/span>&lt;span class="lnt"> 2
+&lt;/span>&lt;span class="lnt"> 3
+&lt;/span>&lt;span class="lnt"> 4
+&lt;/span>&lt;span class="lnt"> 5
+&lt;/span>&lt;span class="lnt"> 6
+&lt;/span>&lt;span class="lnt"> 7
+&lt;/span>&lt;span class="lnt"> 8
+&lt;/span>&lt;span class="lnt"> 9
+&lt;/span>&lt;span class="lnt">10
+&lt;/span>&lt;span class="lnt">11
+&lt;/span>&lt;/code>&lt;/pre>&lt;/td>
+&lt;td class="lntd">
+&lt;pre tabindex="0" class="chroma">&lt;code class="language-scala" data-lang="scala">&lt;span class="line">&lt;span class="cl"> &lt;span class="k">for&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span> &lt;span class="k">&amp;lt;-&lt;/span> &lt;span class="mi">0&lt;/span> &lt;span class="n">until&lt;/span> &lt;span class="n">plWidth&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">{&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">can_allocate&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="n">freelist&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">alloc_pregs&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">valid&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="c1">// Push back against Decode stage if Rename1 can&amp;#39;t proceed.
+&lt;/span>&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">&lt;span class="c1">&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren_stalls&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="o">(&lt;/span>&lt;span class="n">ren2_uops&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">).&lt;/span>&lt;span class="n">dst_rtype&lt;/span> &lt;span class="o">===&lt;/span> &lt;span class="n">rtype&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="o">&amp;amp;&amp;amp;&lt;/span> &lt;span class="o">!&lt;/span>&lt;span class="n">can_allocate&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="k">val&lt;/span> &lt;span class="n">bypassed_uop&lt;/span> &lt;span class="k">=&lt;/span> &lt;span class="nc">Wire&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="k">new&lt;/span> &lt;span class="nc">MicroOp&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">bypassed_uop&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="nc">BypassAllocations&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">ren2_uops&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">),&lt;/span> &lt;span class="n">ren2_uops&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">take&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">),&lt;/span> &lt;span class="n">ren2_alloc_reqs&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">take&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">))&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl">
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">ren2_uops&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">w&lt;/span>&lt;span class="o">)&lt;/span> &lt;span class="k">:&lt;/span>&lt;span class="o">=&lt;/span> &lt;span class="nc">GetNewUopAndBrMask&lt;/span>&lt;span class="o">(&lt;/span>&lt;span class="n">bypassed_uop&lt;/span>&lt;span class="o">,&lt;/span> &lt;span class="n">io&lt;/span>&lt;span class="o">.&lt;/span>&lt;span class="n">brupdate&lt;/span>&lt;span class="o">)&lt;/span>
+&lt;/span>&lt;/span>&lt;span class="line">&lt;span class="cl"> &lt;span class="o">}&lt;/span>
+&lt;/span>&lt;/span>&lt;/code>&lt;/pre>&lt;/td>&lt;/tr>&lt;/table>
+&lt;/div>
+&lt;/div>&lt;p>当物理寄存器个数不够时，对应端口会拉高&lt;code>ren_stalls&lt;/code>信号，
+然后&lt;code>dis_ready&lt;/code>为false，从而使得&lt;code>dec_ready&lt;/code>为false&lt;/p></description></item></channel></rss>
