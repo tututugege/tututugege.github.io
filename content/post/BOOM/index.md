@@ -16,9 +16,10 @@ categories:
 
 ## 重命名
 
-BOOM采用的是统一的物理寄存器实现重命名的设计，也就是所谓的“explicit renaming”，只有PRF，然后用单独的map table来管理映射关系，而另一种“implicit renaming”则是将结果写入ROB，然后ROB提交时才写回逻辑寄存器。
+BOOM采用的是统一的物理寄存器实现重命名的设计，也就是所谓的“explicit renaming”，只有PRF，然后用单独的map table来管理映射关系，而另一种“implicitrenaming”
+则是将结果写入ROB，然后ROB提交时才写回逻辑寄存器。
 
-我原以为显式重命名应该是更先进的方式，但文档上说P4，ARM A57采用的是隐式重命名，更老的的MIPS R10K，Alpha 21264采用的是显式重命名，说明这两种设计算是各有取舍，上网查了一下Core架构和Zen架构都有显式的Rename alias table。
+我原以为显式重命名应该是更先进的方式，但文档上说P4，ARM A57采用的是隐式重命名，更老的的MIPS R10K，Alpha21264采用的是显式重命名，说明这两种设计算是各有取舍。
 
 重命名模块的组成成分可以分为：Map Table、Free List、Busy Table三部分。
 
@@ -33,7 +34,6 @@ BOOM对每个分支TAG保存了完整的`map_table`，这种实现方面会导�
 BOOM有两种实现，可以同时保存了推测执行的重命名表和提交之后才变化的committed map table， 
 
 misprediction时用其恢复，也可以用ROB中记录的旧映射关系恢复，
-
 
 这部分代码还算比较好理解
 ```scala
@@ -52,7 +52,8 @@ architecture map table，根据rollback的处理方法决定是否存在，
   val com_remap_pdsts = io.com_remap_reqs map (_.pdst)
   val com_remap_ldsts_oh = io.com_remap_reqs map (req => UIntToOH(req.ldst) & Fill(numLregs, req.valid.asUInt))
 ```
-每个表项，检查每个修改重命名表的请求地址独热码的对应位来选择表项的下一个值，函数式编程实在不太容易一眼看出端倪，如果用verilog描述应该会很好理解。
+修改重命名表的请求对应寄存器号的独热码，
+函数式编程实在不太容易一眼看出端倪，如果用verilog描述应该会很好理解。
 
 ```scala
   // Figure out the new mappings seen by each pipeline slot.
@@ -69,7 +70,9 @@ architecture map table，根据rollback的处理方法决定是否存在，
     }
   }
 ```
-这部分是算出了`remap_table`和`com_remap_table`的中间态，也就是每条指令执行完后相应的map_table长啥样，这样在有多条分支指令时可以填入当前每条指令的snapshot，`remap_table`的第一维长度为`plWidth + 1`，第0个元素即为原来的`map_table`。
+这部分是算出了`remap_table`和`com_remap_table`的中间态，也就是每条指令执行完后相应的map_table长啥样，
+这样在有多条分支指令时可以填入当前每条指令的snapshot，`remap_table`的第一维长度为`plWidth + 1`，
+第0个元素即为原来的`map_table`
 
 ```scala
   // Create snapshots of new mappings.
@@ -90,7 +93,9 @@ architecture map table，根据rollback的处理方法决定是否存在，
   }
 
 ```
-这部分就是在保存每条分支指令的snapshot，一种是一次可以有多条分支指令，另一种是只能有一条。最开始没看懂为啥循环长度为`plWidth + 1`，输入的`ren_br_tags`长度也为`plWidth + 1`，而ex3版本这部分循环长度为`plWidth`，然后发现
+这部分就是在保存每条分支指令的snapshot，一种是一次可以有多条分支指令，
+另一种是只能有一条。最开始没看懂为啥循环长度为`plWidth + 1`，
+输入的`ren_br_tags`长度也为`plWidth + 1`，而ex3版本这部分循环长度为`plWidth`，然后发现
 
 ```scala
   ren2_br_tags(0).valid := false.B
@@ -102,7 +107,8 @@ architecture map table，根据rollback的处理方法决定是否存在，
     ren2_br_tags(w+1).bits  := ren2_uops(w).br_tag
 ```
 
-输入的0端口其实就是无效的，其他每部分都往后偏移一个单位，其实真正有效的输入只有`plWidth`个，然后每个输入都往后挪一个单位就行，这么处理可能是为了代码更好看，多出来的信号应该是会被优化掉的。
+输入的0端口其实就是无效的，其他每部分都往后偏移一个单位，其实真正有效的输入只有`plWidth`个，
+然后每个输入都往后挪一个单位就行，这么处理可能是为了代码更好看，多出来的信号应该是会被优化掉的。
 
 ```scala
 for (i <- 0 until plWidth) {
@@ -121,7 +127,6 @@ for (i <- 0 until plWidth) {
 这部分处理的是`map_table`的前递，实际上输入的`remap_reqs`并非当前的`map_reqs`对应的pdst，
 这部分是上一个周期的指令分配到的目的寄存器，此时还未将映射关系写入`map_table`
 后面在`rename-stage`中还需要处理同时重命名的指令的前递问题。
-
 
 ### Free List
 ```scala
@@ -143,12 +148,12 @@ Free List有三部分，`free_list`保存当前空闲的寄存器，
   val rollback_deallocs = spec_alloc_list & Fill(n, io.rollback)
 ```
 
-最开始没太看懂spec_alloc_list的作用，总感觉似乎和free_list只是取反的一个关系，
-实际并非如此，spec_alloc_list用于rollback，也就是消除当前的推测状态，
-即上面的rollback_deallocs，一条指令的pdst在ROB提交时即消除了推测的分配状态，
-因此在spec_alloc_list要置为0，
-但是这个pdst只有作为某条指令的stale_pdst被提交时才会被释放放回free_list，
-输入的com_despec即为当前提交指令的pdst
+最开始没太看懂`spec_alloc_list`的作用，总感觉似乎和`free_list`只是取反的一个关系，
+实际并非如此，目前我的理解是`spec_alloc_list`用于rollback，也就是消除当前的推测状态，
+即上面的`rollback_deallocs`，一条指令的pdst在ROB提交时即消除了推测的分配状态，
+因此在`spec_alloc_list`中要置为0，
+但是这个pdst只有作为某条指令的`stale_pdst`被提交时才会被释放放回`free_list`，
+所以`spec_alloc_list`和`~free_list`并不相等，输入的com_despec即为当前提交指令的pdst
 
 ```scala
   // Update branch snapshots
@@ -189,7 +194,9 @@ Free List有三部分，`free_list`保存当前空闲的寄存器，
   }
 
 ```
-这里对分支br_alloc_lists的记录巧用了前面的`scanRight`，`alloc_masks`每个元素对应的恰好就是该指令以及之后指令alloc到的物理寄存器，函数式编程还真有用，虽然还是不好理解
+这里对分支br_alloc_lists的记录巧用了前面的`scanRight`，
+`alloc_masks`每个元素对应的恰好就是该指令以及之后的指令alloc到的物理寄存器，
+函数式编程还真有用，虽然还是不好理解
 
 ### Busy Table
 ```scala
